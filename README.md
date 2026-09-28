@@ -76,6 +76,35 @@ the next successful run closes it. If upstream changes its own GitHub
 workflow files, the workflow token cannot update the source branches; releases
 continue and the branches catch up after a manual push.
 
+## Why `main` holds only patches
+
+`main` has no OpenRGB history: it holds the patches, the workflow and this
+README, and the workflow fetches upstream at build time (the patch-queue
+layout used by projects such as VSCodium or LibreWolf). The `upstream` and
+`retro87` branches are generated for browsing. Because they share no history
+with `main`, GitHub shows `retro87` as thousands of commits "ahead" and one
+"behind" `main`; the meaningful comparison is
+[`upstream...retro87`](../../compare/upstream...retro87), which is always the
+single patch commit.
+
+This is deliberate. The token GitHub gives each workflow run
+(`GITHUB_TOKEN`) may not push commits that add or change files under
+`.github/workflows/`. If the workflow lived on the patched branch itself, the
+alternatives would be:
+
+- **Rebase that branch onto upstream.** This rewrites the commit containing the
+  workflow file, so the push would need a personal access token (or GitHub App
+  token) with workflow permission, created by the owner and stored as a
+  repository secret.
+- **Merge upstream into it.** This works with the built-in token, but it would
+  still be refused whenever upstream changes its own workflow files, and the
+  history fills with merge commits.
+
+With the workflow on a separate `main`, updates never rewrite the branch the
+workflow lives on and no extra token is needed. When upstream changes its own
+workflow files, only the generated `upstream` and `retro87` branches are
+refused and lag until pushed by hand; releases continue.
+
 ## Updating the patches
 
 Work on the `retro87` branch in a checkout of this repository, then export the
