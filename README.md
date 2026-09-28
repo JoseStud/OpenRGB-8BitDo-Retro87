@@ -107,12 +107,26 @@ refused and lag until pushed by hand; releases continue.
 
 ## Updating the patches
 
-Work on the `retro87` branch in a checkout of this repository, then export the
-difference to upstream as the patch and push it to `main`:
+This fork stays a patch queue on purpose: the OpenRGB side is expected to
+change rarely, and new lighting modes or states are written as SDK clients
+(Direct, Custom and the effects already exist), which need no patch change
+at all. If the OpenRGB code starts to see active development, a Git-native
+fork (the changes as real commits on `retro87`, with upstream merged in)
+would suit better.
 
-```sh
-git diff upstream retro87 > patches/0001-8bitdo-retro87.patch
-```
+The patch has a second, identical copy in the tools repository,
+[`openrgb/retro87-openrgb.patch`](https://github.com/JoseStud/8bitdo-retro87-tools/blob/main/openrgb/retro87-openrgb.patch),
+from which the tools' installer builds OpenRGB locally. The two are kept in
+sync by hand:
+
+1. Change and test the code in an OpenRGB checkout on upstream `master`.
+2. Export the difference (including new files) and commit it to the tools
+   repository, as described in its `OPENRGB.md` ("Maintaining the fork").
+3. Copy the same file to `patches/0001-8bitdo-retro87.patch` here and push to
+   `main`; the push starts the workflow, which releases a new AppImage.
+
+The release tag ends in the first 10 hex digits of the patch's SHA-256
+(`...-p<hash>`), so both copies can be checked with `sha256sum`.
 
 ## About the code
 
