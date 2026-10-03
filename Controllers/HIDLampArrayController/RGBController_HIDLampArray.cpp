@@ -368,9 +368,14 @@ void RGBController_HIDLampArray::SetupZones()
     {
         led new_led;
 
-        unsigned char lamp_key = controller->GetLamps()[lamp_idx].LampKey;
+        unsigned char lamp_key  = controller->GetLamps()[lamp_idx].LampKey;
+        std::string   lamp_name = controller->GetLampName((unsigned int)lamp_idx);
 
-        if(lamp_key < HID_KEYBOARD_USAGE_IDS_COUNT && HIDUsageIDsToKeyNames[lamp_key] != nullptr)
+        if(!lamp_name.empty())
+        {
+            new_led.name = lamp_name;
+        }
+        else if(lamp_key < HID_KEYBOARD_USAGE_IDS_COUNT && HIDUsageIDsToKeyNames[lamp_key] != nullptr)
         {
             new_led.name = HIDUsageIDsToKeyNames[lamp_key];
         }

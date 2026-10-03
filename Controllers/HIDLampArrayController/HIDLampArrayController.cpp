@@ -11,14 +11,86 @@
 
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include "hid_util.h"
 #include "HIDLampArrayController.h"
 #include "StringUtils.h"
 
-HIDLampArrayController::HIDLampArrayController(hid_device *dev_handle, const char *path)
+#ifdef __linux__
+#include <libusb.h>
+
+#define HID_LAMPARRAY_USB_TIMEOUT   1000
+#define HID_REQUEST_GET_REPORT      0x01
+#define HID_REQUEST_SET_REPORT      0x09
+#define HID_REPORT_TYPE_FEATURE     0x03
+#define HID_DESCRIPTOR_TYPE_REPORT  0x22
+#endif
+
+/*---------------------------------------------------------*\
+| 8BitDo Retro 87 Keyboard X (wired): the firmware reports  |
+| some X positions 10x or 100x too large, the right arrow   |
+| at (0, 0), backspace with the backslash usage, and no     |
+| usage for pause, four of the five space bar lamps and the |
+| A and B keys.                                             |
+\*---------------------------------------------------------*/
+#define EIGHTBITDO_VID                  0x2DC8
+#define EIGHTBITDO_RETRO87_WIRED_PID    0x2028
+#define EIGHTBITDO_RETRO87_LAMP_COUNT   91
+
+HIDLampArrayController::HIDLampArrayController(hid_device *dev_handle, const char *path, unsigned short vid, unsigned short pid)
 {
     dev                                 = dev_handle;
-    location                            = path;
+    location                            = "HID: " + std::string(path);
+    vendor_id                           = vid;
+    product_id                          = pid;
+#ifdef __linux__
+    usb_dev                             = NULL;
+    usb_interface                       = -1;
+#endif
+
+    Initialize();
+}
+
+#ifdef __linux__
+static std::string GetUSBString(libusb_device_handle *handle, uint8_t index)
+{
+    unsigned char string[128];
+
+    if(index == 0 || libusb_get_string_descriptor_ascii(handle, index, string, sizeof(string)) < 0)
+    {
+        return("");
+    }
+
+    return(std::string((const char *)string));
+}
+
+HIDLampArrayController::HIDLampArrayController(std::shared_ptr<libusb_context> context, libusb_device_handle *usb_handle, int interface_number, const std::string& path, unsigned short vid, unsigned short pid)
+{
+    dev                                 = NULL;
+    location                            = "USB: " + path;
+    vendor_id                           = vid;
+    product_id                          = pid;
+    usb_context                         = context;
+    usb_dev                             = usb_handle;
+    usb_interface                       = interface_number;
+
+    libusb_device_descriptor descriptor;
+
+    if(libusb_get_device_descriptor(libusb_get_device(usb_dev), &descriptor) == 0)
+    {
+        usb_name                        = GetUSBString(usb_dev, descriptor.iProduct);
+        usb_serial                      = GetUSBString(usb_dev, descriptor.iSerialNumber);
+        usb_vendor                      = GetUSBString(usb_dev, descriptor.iManufacturer);
+    }
+
+    Initialize();
+}
+#endif
+
+void HIDLampArrayController::Initialize()
+{
+    memset(&ids, 0, sizeof(ids));
+    memset(&LampArray, 0, sizeof(LampArray));
 
     /*-----------------------------------------------------*\
     | Parse report IDs from descriptor                      |
@@ -31,7 +103,7 @@ HIDLampArrayController::HIDLampArrayController(hid_device *dev_handle, const cha
     unsigned int  pos                   = 0;
     unsigned char report_descriptor[HID_API_MAX_REPORT_DESCRIPTOR_SIZE];
     unsigned char report_id             = 0;
-    int           size                  = hid_get_report_descriptor(dev, report_descriptor, sizeof(report_descriptor));
+    int           size                  = GetReportDescriptor(report_descriptor, sizeof(report_descriptor));
     unsigned int  usage                 = 0;
     unsigned char usage_page            = 0;
 
@@ -171,20 +243,117 @@ HIDLampArrayController::HIDLampArrayController(hid_device *dev_handle, const cha
     {
         GetLampAttributesResponseReport();
     }
+
+    ApplyQuirks();
+}
+
+void HIDLampArrayController::ApplyQuirks()
+{
+    if(vendor_id == EIGHTBITDO_VID && product_id == EIGHTBITDO_RETRO87_WIRED_PID
+    && Lamps.size() == EIGHTBITDO_RETRO87_LAMP_COUNT)
+    {
+        for(LampAttributes& lamp : Lamps)
+        {
+            while(lamp.PositionXInMicrometers > LampArray.BoundingBoxWidthInMicrometers)
+            {
+                lamp.PositionXInMicrometers /= 10;
+            }
+        }
+
+        Lamps[90].PositionXInMicrometers    = 360000;       /* Right arrow, after down  */
+        Lamps[90].PositionYInMicrometers    = 144000;
+        Lamps[29].LampKey                   = 0x2A;         /* Backspace                */
+        Lamps[15].LampKey                   = 0x48;         /* Pause                    */
+
+        const unsigned int space_lamps[]    = { 79, 80, 82, 83 };
+
+        for(unsigned int lamp_idx : space_lamps)
+        {
+            Lamps[lamp_idx].LampKey         = 0x2C;         /* Space                    */
+        }
+
+        lamp_names.resize(Lamps.size());
+        lamp_names[85]                      = "Key: A (Super button)";
+        lamp_names[86]                      = "Key: B (Super button)";
+    }
 }
 
 HIDLampArrayController::~HIDLampArrayController()
 {
-    hid_close(dev);
+    if(dev)
+    {
+        hid_close(dev);
+    }
+
+#ifdef __linux__
+    if(usb_dev)
+    {
+        libusb_release_interface(usb_dev, usb_interface);
+        libusb_close(usb_dev);
+    }
+#endif
+}
+
+int HIDLampArrayController::GetReportDescriptor(unsigned char *data, size_t length)
+{
+#ifdef __linux__
+    if(usb_dev)
+    {
+        return(libusb_control_transfer(usb_dev, LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_STANDARD | LIBUSB_RECIPIENT_INTERFACE,
+                                       LIBUSB_REQUEST_GET_DESCRIPTOR, HID_DESCRIPTOR_TYPE_REPORT << 8, usb_interface,
+                                       data, (uint16_t)length, HID_LAMPARRAY_USB_TIMEOUT));
+    }
+#endif
+
+    return(hid_get_report_descriptor(dev, data, length));
+}
+
+int HIDLampArrayController::GetFeatureReport(unsigned char *data, size_t length)
+{
+#ifdef __linux__
+    if(usb_dev)
+    {
+        /*-------------------------------------------------*\
+        | As with hidapi, data[0] holds the report ID and   |
+        | the returned report starts with it                |
+        \*-------------------------------------------------*/
+        return(libusb_control_transfer(usb_dev, LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE,
+                                       HID_REQUEST_GET_REPORT, (HID_REPORT_TYPE_FEATURE << 8) | data[0], usb_interface,
+                                       data, (uint16_t)length, HID_LAMPARRAY_USB_TIMEOUT));
+    }
+#endif
+
+    return(hid_get_feature_report(dev, data, length));
+}
+
+int HIDLampArrayController::SendFeatureReport(const unsigned char *data, size_t length)
+{
+#ifdef __linux__
+    if(usb_dev)
+    {
+        return(libusb_control_transfer(usb_dev, LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE,
+                                       HID_REQUEST_SET_REPORT, (HID_REPORT_TYPE_FEATURE << 8) | data[0], usb_interface,
+                                       (unsigned char *)data, (uint16_t)length, HID_LAMPARRAY_USB_TIMEOUT));
+    }
+#endif
+
+    return(hid_send_feature_report(dev, data, length));
 }
 
 std::string HIDLampArrayController::GetDeviceLocation()
 {
-    return("HID: " + location);
+    return(location);
 }
 
 std::string HIDLampArrayController::GetDeviceName()
 {
+#ifdef __linux__
+    if(usb_dev)
+    {
+        return(usb_name);
+    }
+#endif
+
     wchar_t name_string[128];
     int ret = hid_get_product_string(dev, name_string, 128);
 
@@ -198,6 +367,13 @@ std::string HIDLampArrayController::GetDeviceName()
 
 std::string HIDLampArrayController::GetDeviceSerial()
 {
+#ifdef __linux__
+    if(usb_dev)
+    {
+        return(usb_serial);
+    }
+#endif
+
     wchar_t serial_string[128];
     int ret = hid_get_serial_number_string(dev, serial_string, 128);
 
@@ -211,6 +387,13 @@ std::string HIDLampArrayController::GetDeviceSerial()
 
 std::string HIDLampArrayController::GetDeviceVendor()
 {
+#ifdef __linux__
+    if(usb_dev)
+    {
+        return(usb_vendor);
+    }
+#endif
+
     wchar_t vendor_string[128];
     int ret = hid_get_manufacturer_string(dev, vendor_string, 128);
 
@@ -237,6 +420,16 @@ std::vector<LampAttributes> HIDLampArrayController::GetLamps()
     return(Lamps);
 }
 
+std::string HIDLampArrayController::GetLampName(unsigned int LampId)
+{
+    if(LampId < lamp_names.size())
+    {
+        return(lamp_names[LampId]);
+    }
+
+    return("");
+}
+
 void HIDLampArrayController::GetLampArrayAttributesReport()
 {
     unsigned char   usb_buf[sizeof(LampArrayAttributes) + 1];
@@ -251,7 +444,7 @@ void HIDLampArrayController::GetLampArrayAttributesReport()
     /*-----------------------------------------------------*\
     | Get the report                                        |
     \*-----------------------------------------------------*/
-    hid_get_feature_report(dev, usb_buf, sizeof(usb_buf));
+    GetFeatureReport(usb_buf, sizeof(usb_buf));
 
     memcpy(&LampArray, &usb_buf[1], sizeof(LampArray));
 }
@@ -271,7 +464,7 @@ void HIDLampArrayController::GetLampAttributesResponseReport()
     /*-----------------------------------------------------*\
     | Get the report                                        |
     \*-----------------------------------------------------*/
-    hid_get_feature_report(dev, usb_buf, sizeof(usb_buf));
+    GetFeatureReport(usb_buf, sizeof(usb_buf));
 
     memcpy(&attributes, &usb_buf[1], sizeof(attributes));
 
@@ -300,7 +493,7 @@ void HIDLampArrayController::SetLampArrayControlReport(unsigned char AutonomousM
     /*-----------------------------------------------------*\
     | Send the report                                       |
     \*-----------------------------------------------------*/
-    hid_send_feature_report(dev, usb_buf, sizeof(usb_buf));
+    SendFeatureReport(usb_buf, sizeof(usb_buf));
 }
 
 void HIDLampArrayController::SetLampAttributesRequestReport(unsigned short LampId)
@@ -322,7 +515,7 @@ void HIDLampArrayController::SetLampAttributesRequestReport(unsigned short LampI
     /*-----------------------------------------------------*\
     | Send the report                                       |
     \*-----------------------------------------------------*/
-    hid_send_feature_report(dev, usb_buf, sizeof(usb_buf));
+    SendFeatureReport(usb_buf, sizeof(usb_buf));
 }
 
 void HIDLampArrayController::SetLampMultiUpdateReport(unsigned char LampCount, unsigned char LampUpdateFlags, unsigned short * LampIds, LampArrayColor * UpdateColors)
@@ -351,5 +544,5 @@ void HIDLampArrayController::SetLampMultiUpdateReport(unsigned char LampCount, u
     /*-----------------------------------------------------*\
     | Send the report                                       |
     \*-----------------------------------------------------*/
-    hid_send_feature_report(dev, usb_buf, sizeof(usb_buf));
+    SendFeatureReport(usb_buf, sizeof(usb_buf));
 }
