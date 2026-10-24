@@ -11,7 +11,9 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
+#include <vector>
 #include <hidapi.h>
 
 #include "RGBController.h"
@@ -106,10 +108,24 @@ enum
     HID_LAMPARRAY_KIND_ART              = 0x0A,     /* LampArrayKindArt             */
 };
 
+#ifdef __linux__
+/*---------------------------------------------------------*\
+| LampArray interfaces without an interrupt IN endpoint are |
+| not bound by the Linux usbhid driver, so they have no     |
+| hidraw node for hidapi.  They are reached through libusb  |
+| control transfers instead.                                |
+\*---------------------------------------------------------*/
+struct libusb_context;
+struct libusb_device_handle;
+#endif
+
 class HIDLampArrayController
 {
 public:
-    HIDLampArrayController(hid_device *dev_handle, const char *path);
+    HIDLampArrayController(hid_device *dev_handle, const char *path, unsigned short vid, unsigned short pid);
+#ifdef __linux__
+    HIDLampArrayController(std::shared_ptr<libusb_context> context, libusb_device_handle *usb_handle, int interface_number, const std::string& path, unsigned short vid, unsigned short pid);
+#endif
     ~HIDLampArrayController();
 
     std::string GetDeviceLocation();
@@ -120,6 +136,7 @@ public:
     unsigned int GetLampArrayKind();
     unsigned int GetLampCount();
     std::vector<LampAttributes> GetLamps();
+    std::string GetLampName(unsigned int LampId);
 
     void SetLampArrayControlReport(unsigned char AutonomousMode);
     void SetLampMultiUpdateReport(unsigned char LampCount, unsigned char LampUpdateFlags, unsigned short * LampIds, LampArrayColor * UpdateColors);
@@ -128,6 +145,22 @@ private:
     hid_device *                dev;
     HIDLampArrayReportIDs       ids;
     std::string                 location;
+    unsigned short              vendor_id;
+    unsigned short              product_id;
+
+#ifdef __linux__
+    std::shared_ptr<libusb_context> usb_context;
+    libusb_device_handle *      usb_dev;
+    int                         usb_interface;
+    std::string                 usb_name;
+    std::string                 usb_serial;
+    std::string                 usb_vendor;
+#endif
+
+    /*-----------------------------------------------------*\
+    | Names for lamps with no HID usage (device quirks)     |
+    \*-----------------------------------------------------*/
+    std::vector<std::string>    lamp_names;
 
     /*-----------------------------------------------------*\
     | Vector to store lamp attributes for each lamp         |
@@ -139,7 +172,23 @@ private:
     \*-----------------------------------------------------*/
     LampArrayAttributes         LampArray;
 
+    void Initialize();
+    void ApplyQuirks();
+
+    int  GetReportDescriptor(unsigned char *data, size_t length);
+    int  GetFeatureReport(unsigned char *data, size_t length);
+    int  SendFeatureReport(const unsigned char *data, size_t length);
+
     void GetLampArrayAttributesReport();
     void GetLampAttributesResponseReport();
     void SetLampAttributesRequestReport(unsigned short LampId);
 };
+
+#ifdef __linux__
+/*---------------------------------------------------------*\
+| Open the LampArray interfaces that usbhid leaves unbound  |
+| (no interrupt IN endpoint), through libusb: those of the  |
+| given USB device, or (exclude) of every other device.     |
+\*---------------------------------------------------------*/
+std::vector<HIDLampArrayController*> OpenHIDLampArrayUSBControllers(unsigned short vid, unsigned short pid, bool exclude);
+#endif
